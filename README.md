@@ -98,7 +98,11 @@
 - release下载
   [Github Release](https://github.com/docmirror/dev-sidecar/releases)
 
-> Windows: 请选择DevSidecar-x.x.x-windows-universal.exe
+> Windows: 请选择DevSidecar-x.x.x-windows-universal.exe 或[使用 Windows 包管理器](https://learn.microsoft.com/windows/package-manager/winget/)：
+>
+> ```CMD
+> winget add --id docmirror.dev-sidecar -e --accept-package-agreements --accept-source-agreements
+> ```
 >
 > Mac: 请选择DevSidecar-x.x.x-macos-universal.dmg
 >
