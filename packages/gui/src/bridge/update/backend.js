@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import tls from 'node:tls'
 import { fileURLToPath } from 'node:url'
 import DevSidecar from '@docmirror/dev-sidecar'
 import AdmZip from 'adm-zip'
@@ -22,6 +23,67 @@ const isLinux = process.platform === 'linux'
 const curVersion = pkg.version
 const isCurrentPreRelease = curVersion.includes('-')
 
+let cachedRootCaCert = null
+/**
+ * 更新检查/下载会走本地 MITM 代理，需要信任 dev-sidecar 自己的根证书；
+ * 同时也保留 Node 内置根证书，保证直连 GitHub 时也能正常校验。
+ */
+function getTrustedCaList () {
+  const caList = [...tls.rootCertificates]
+  if (cachedRootCaCert != null) {
+    if (cachedRootCaCert !== false) {
+      caList.push(cachedRootCaCert)
+    }
+    return caList
+  }
+
+  try {
+    const certPath = DevSidecar.api?.config?.get()?.server?.setting?.rootCaFile?.certPath
+    if (certPath && fs.existsSync(certPath)) {
+      cachedRootCaCert = fs.readFileSync(certPath, 'utf8')
+      caList.push(cachedRootCaCert)
+    } else {
+      cachedRootCaCert = false
+    }
+  } catch (e) {
+    log.warn('读取 dev-sidecar 根证书失败:', e)
+    cachedRootCaCert = false
+  }
+  return caList
+}
+
+/**
+ * 获取当前平台/架构对应的资源命名。
+ * - partArch: 增量包命名用（win-x64 / win-arm64 / win-ia32）
+ * - fullArch: 完整安装包命名用（windows-x86_64 / windows-arm64 / linux-armv7l 等）
+ */
+function getPlatformAssetInfo () {
+  const arch = process.arch
+  let partArch
+  let fullArch
+  if (arch === 'ia32') {
+    partArch = 'ia32'
+    fullArch = 'ia32'
+  } else if (arch === 'arm64') {
+    partArch = 'arm64'
+    fullArch = 'arm64'
+  } else if (arch === 'arm') {
+    partArch = 'x64' // 无 arm 增量包时兜底
+    fullArch = 'armv7l'
+  } else {
+    partArch = 'x64'
+    fullArch = 'x86_64'
+  }
+
+  if (isMac) {
+    return { platform: 'macos', partPlatform: 'mac', partArch, fullArch }
+  }
+  if (isLinux) {
+    return { platform: 'linux', partPlatform: 'linux', partArch, fullArch }
+  }
+  return { platform: 'windows', partPlatform: 'win', partArch, fullArch }
+}
+
 function extractVersion (versionData) {
   const candidates = [versionData.tag_name, versionData.name]
   for (const candidate of candidates) {
@@ -38,7 +100,7 @@ function extractVersion (versionData) {
 
 function downloadFile (uri, filePath, onProgress, onSuccess, onError) {
   log.info('download url', uri)
-  progress(request(uri), {
+  progress(request(uri, { ca: getTrustedCaList() }), {
     // throttle: 2000,                    // Throttle the progress event to 2000ms, defaults to 1000ms
     // delay: 1000,                       // Only start to emit after 1000ms delay, defaults to 0ms
     // lengthHeader: 'x-transfer-length'  // Length header to use, defaults to content-length
@@ -54,7 +116,7 @@ function downloadFile (uri, filePath, onProgress, onSuccess, onError) {
     })
     .on('end', () => {
       // Do something after request finishes
-      onSuccess()
+      onSuccess(filePath)
     })
     .pipe(fs.createWriteStream(filePath))
 }
@@ -98,7 +160,7 @@ function updateHandle (app, api, win, beforeQuit, quit, log) {
   // 检查更新
   const releasesApiUrl = 'https://api.github.com/repos/docmirror/dev-sidecar/releases'
   async function checkForUpdatesFromGitHub () {
-    request(releasesApiUrl, { headers: { 'User-Agent': `DS/${curVersion}`, 'Server-Name': 'baidu.com' } }, (error, response, body) => {
+    request(releasesApiUrl, { headers: { 'User-Agent': `DS/${curVersion}`, 'Server-Name': 'baidu.com' }, ca: getTrustedCaList() }, (error, response, body) => {
       try {
         if (error) {
           log.error('检查更新失败:', error)
@@ -162,10 +224,19 @@ function updateHandle (app, api, win, beforeQuit, quit, log) {
               log.info(`检查更新：发现新版本 '${onlineVersion}'，当前版本号为 '${curVersion}'`)
 
               // 查找当前平台+架构对应的增量更新包
-              const arch = process.arch === 'ia32' ? 'ia32' : process.arch === 'arm64' ? 'arm64' : 'x64'
-              const platformPrefix = isMac ? `update-mac-${arch}-` : isLinux ? `update-linux-${arch}-` : `update-win-${arch}-`
-              const partAsset = versionData.assets.find(a => a.name && a.name.startsWith(platformPrefix) && a.name.endsWith('.zip'))
+              const assetInfo = getPlatformAssetInfo()
+              const partPrefix = `update-${assetInfo.partPlatform}-${assetInfo.partArch}-`
+              const partAsset = versionData.assets.find(a => a.name && a.name.startsWith(partPrefix) && a.name.endsWith('.zip'))
               const partPackage = partAsset ? partAsset.browser_download_url : null
+
+              // 查找当前平台+架构对应的完整安装包
+              const fullPrefix = `DevSidecar-${onlineVersion}-${assetInfo.platform}-${assetInfo.fullArch}.`
+              const fullSuffix = assetInfo.platform === 'windows' ? '.exe' : assetInfo.platform === 'macos' ? '.dmg' : '.AppImage'
+              const fullAsset = versionData.assets.find(a => a.name && a.name.startsWith(fullPrefix) && a.name.endsWith(fullSuffix))
+              const fullPackage = fullAsset ? fullAsset.browser_download_url : null
+              const fullPackageName = fullAsset ? fullAsset.name : null
+
+              log.info(`平台资源匹配: ${JSON.stringify({ assetInfo, partPackage, fullPackageName })}`)
 
               win.webContents.send('update', {
                 key: 'available',
@@ -175,6 +246,8 @@ function updateHandle (app, api, win, beforeQuit, quit, log) {
                     ? (versionData.body.replace(/\r\n/g, '\n').replace(/https:\/\/github.com\/docmirror\/dev-sidecar/g, '').replace(/(?<=(^|\n))[ \t]*(?:#[ #]*)?#\s*/g, '') || '无')
                     : '无',
                   partPackage,
+                  fullPackage,
+                  fullPackageName,
                 },
               })
             } else {
@@ -238,14 +311,49 @@ function updateHandle (app, api, win, beforeQuit, quit, log) {
 
     downloadFile(value.partPackage, filePath, (data) => {
       win.webContents.send('update', { key: 'progress', value: Number.parseInt(data) })
-    }, () => {
+    }, (downloadedPath) => {
       // 文件下载完成
       win.webContents.send('update', { key: 'progress', value: 100 })
-      log.info('升级包下载成功：', filePath)
-      partPackagePath = filePath
+      log.info('升级包下载成功：', downloadedPath)
+      partPackagePath = downloadedPath
       win.webContents.send('update', {
         key: 'downloaded',
         value,
+        filePath: downloadedPath,
+        updateType: 'part',
+      })
+    }, (error) => {
+      sendUpdateMessage({ key: 'error', value: error, error })
+    })
+  }
+
+  // 下载完整安装包（按平台+架构自动匹配后的安装文件）
+  function downloadFull (app, value) {
+    if (!value.fullPackage) {
+      sendUpdateMessage({ key: 'error', value: new Error('未找到对应的完整安装包'), error: '未找到对应的完整安装包' })
+      return
+    }
+    const appPath = appPathUtil.getAppRootPath(app)
+    const fileDir = path.join(appPath, 'update')
+    log.info('download full dir:', fileDir)
+    try {
+      fs.accessSync(fileDir, fs.constants.F_OK)
+    } catch {
+      fs.mkdirSync(fileDir)
+    }
+    const fileName = value.fullPackageName || `${value.version}-${getPlatformAssetInfo().platform}-${getPlatformAssetInfo().fullArch}`
+    const filePath = path.join(fileDir, fileName)
+
+    downloadFile(value.fullPackage, filePath, (data) => {
+      win.webContents.send('update', { key: 'progress', value: Number.parseInt(data) })
+    }, (downloadedPath) => {
+      win.webContents.send('update', { key: 'progress', value: 100 })
+      log.info('完整安装包下载成功：', downloadedPath)
+      win.webContents.send('update', {
+        key: 'downloaded',
+        value,
+        filePath: downloadedPath,
+        updateType: 'full',
       })
     }, (error) => {
       sendUpdateMessage({ key: 'error', value: error, error })
@@ -337,6 +445,10 @@ function updateHandle (app, api, win, beforeQuit, quit, log) {
       // 下载增量更新版本
       log.info('autoUpdater downloadPart')
       downloadPart(app, arg.value)
+    } else if (arg.key === 'downloadFull') {
+      // 下载完整安装包
+      log.info('autoUpdater downloadFull')
+      downloadFull(app, arg.value)
     }
   })
   // 通过main进程发送事件给renderer进程，提示更新信息
