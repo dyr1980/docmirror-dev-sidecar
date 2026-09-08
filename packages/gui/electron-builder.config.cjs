@@ -85,11 +85,8 @@ module.exports = {
           { target: 'rpm', arch: ['x64', 'arm64', 'armv7l'] },
           { target: 'flatpak', arch: ['x64'] },
           // Arch Linux (fpm/pacman), 产物为 .pkg.tar.xz, 可直接 pacman -U 安装
-          {
-            target: 'pacman',
-            arch: ['x64', 'arm64'],
-            artifactName: 'DevSidecar-${version}-${arch}.pkg.tar.xz',
-          },
+          // ✅ 修复：移除 pacman target 中的 artifactName，使用根级别的 artifactName
+          { target: 'pacman', arch: ['x64', 'arm64'] },
         ]
       : [
           { target: 'deb', arch: [localArch] },
