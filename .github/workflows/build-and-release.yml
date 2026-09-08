@@ -193,7 +193,7 @@ jobs:
       - name: "npm run electron:build (Windows/macOS)"
         if: ${{ matrix.os != 'ubuntu' }}
         env:
-          VUE_APP_PUBLISH_URL: https://github.com/docmirror/dev-sidecar/releases/download/v${{ steps.package-info.outputs.version }}
+          VUE_APP_PUBLISH_URL: https://github.com/dyr1980/docmirror-dev-sidecar/releases/download/v${{ steps.package-info.outputs.version }}
         run: |
           echo "======================================================================";
           echo "cd packages/gui";
@@ -210,7 +210,7 @@ jobs:
         if: ${{ matrix.os == 'ubuntu' || matrix.os == 'ubuntu-24.04-arm' }}
         env:
           DEBUG: "@malept/flatpak-bundler"
-          VUE_APP_PUBLISH_URL: https://github.com/docmirror/dev-sidecar/releases/download/v${{ steps.package-info.outputs.version }}
+          VUE_APP_PUBLISH_URL: https://github.com/dyr1980/docmirror-dev-sidecar/releases/download/v${{ steps.package-info.outputs.version }}
         run: |
           echo "======================================================================";
           echo "cd packages/gui";
